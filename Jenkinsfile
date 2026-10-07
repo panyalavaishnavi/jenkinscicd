@@ -67,5 +67,22 @@ pipeline {
                 input message: 'Approve production deployment?', ok: 'Deploy'
             }
         }
+
+        stage('Rollback') {
+            steps {
+                input message: 'Trigger Kubernetes rollback?', ok: 'Rollback'
+                bat '''
+                set PATH=C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;%PATH%
+                set MINIKUBE_HOME=C:\\Users\\user
+                set KUBECONFIG=C:\\Users\\user\\.kube\\config
+
+                echo ===== Rolling Back Deployment =====
+                kubectl rollout undo deployment/jenkins-cicd-app -n cicd
+
+                echo ===== Verifying Rollback =====
+                kubectl rollout status deployment/jenkins-cicd-app -n cicd
+                '''
+            }
+        }
     }
 }
