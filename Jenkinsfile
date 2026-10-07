@@ -9,6 +9,7 @@ pipeline {
                 echo ===== Jenkins Environment =====
                 whoami
                 echo USERPROFILE=%USERPROFILE%
+                echo BUILD_NUMBER=%BUILD_NUMBER%
                 echo KUBECONFIG=%KUBECONFIG%
                 echo MINIKUBE_HOME=%MINIKUBE_HOME%
                 where kubectl
@@ -23,7 +24,8 @@ pipeline {
             steps {
                 bat '''
                 set PATH=C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;%PATH%
-                docker build -t jenkins-cicd-app:v1 .
+                echo ===== Building Version %BUILD_NUMBER% =====
+                docker build -t jenkins-cicd-app:%BUILD_NUMBER% .
                 '''
             }
         }
@@ -32,7 +34,8 @@ pipeline {
             steps {
                 bat '''
                 set PATH=C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;%PATH%
-                docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.75.0 image jenkins-cicd-app:v1
+                echo ===== Trivy Security Scan =====
+                docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.75.0 image jenkins-cicd-app:%BUILD_NUMBER%
                 '''
             }
         }
@@ -47,11 +50,11 @@ pipeline {
                 echo ===== Minikube Profile =====
                 minikube profile list
 
-                echo ===== Loading Docker Image =====
-                minikube image load jenkins-cicd-app:v1
+                echo ===== Loading Image Version %BUILD_NUMBER% =====
+                minikube image load jenkins-cicd-app:%BUILD_NUMBER%
 
                 echo ===== Updating Kubernetes Deployment =====
-                kubectl set image deployment/jenkins-cicd-app jenkins-cicd-app=jenkins-cicd-app:v1 -n cicd
+                kubectl set image deployment/jenkins-cicd-app jenkins-cicd-app=jenkins-cicd-app:%BUILD_NUMBER% -n cicd
 
                 echo ===== Checking Deployment =====
                 kubectl rollout status deployment/jenkins-cicd-app -n cicd
