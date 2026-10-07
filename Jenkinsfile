@@ -3,6 +3,15 @@ pipeline {
 
     stages {
 
+        stage('Check Jenkins Environment') {
+            steps {
+                bat 'whoami'
+                bat 'echo USERPROFILE=%USERPROFILE%'
+                bat 'echo KUBECONFIG=%KUBECONFIG%'
+                bat 'kubectl config current-context'
+            }
+        }
+
         stage('Build') {
             steps {
                 bat 'set PATH=C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;%PATH% && docker build -t jenkins-cicd-app:v1 .'
