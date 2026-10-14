@@ -1,87 +1,116 @@
+
 pipeline {
-    agent any
+    agent none
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        APP_NAME = 'jenkins-cicd-app'
+        REGISTRY_PUSH = 'localhost:5000'
+        REGISTRY_PULL = 'host.minikube.internal:5000'
+        DOCKER_PATH = 'C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin'
+        KUBECONFIG = 'C:\\Users\\user\\.kube\\config'
+        MINIKUBE_HOME = 'C:\\Users\\user'
+    }
 
     stages {
-
-        stage('Check Jenkins Environment') {
+        stage('Checkout and Build') {
+            agent { label 'staging-agent' }
             steps {
+                checkout scm
                 bat '''
-                echo ===== Jenkins Environment =====
-                whoami
-                echo USERPROFILE=%USERPROFILE%
-                echo BUILD_NUMBER=%BUILD_NUMBER%
-                echo KUBECONFIG=%KUBECONFIG%
-                echo MINIKUBE_HOME=%MINIKUBE_HOME%
-                where kubectl
-                where minikube
-                kubectl version --client
-                minikube version
+                    set PATH=%DOCKER_PATH%;C:\\Program Files\\Kubernetes\\Minikube;%PATH%
+                    echo ===== Python syntax check =====
+                    python -m py_compile app.py
+                    echo ===== Build version %BUILD_NUMBER% =====
+                    docker build -t %REGISTRY_PUSH%/%APP_NAME%:%BUILD_NUMBER% .
                 '''
             }
         }
 
-        stage('Build') {
+        stage('Trivy Security Scan') {
+            agent { label 'staging-agent' }
             steps {
                 bat '''
-                set PATH=C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;%PATH%
-                echo ===== Building Version %BUILD_NUMBER% =====
-                docker build -t jenkins-cicd-app:%BUILD_NUMBER% .
+                    set PATH=%DOCKER_PATH%;%PATH%
+                    echo ===== Scanning image =====
+                    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.75.0 image --exit-code 1 --severity CRITICAL %REGISTRY_PUSH%/%APP_NAME%:%BUILD_NUMBER%
                 '''
             }
         }
 
-        stage('Security Scan') {
+        stage('Push Image') {
+            agent { label 'staging-agent' }
             steps {
                 bat '''
-                set PATH=C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;%PATH%
-                echo ===== Trivy Security Scan =====
-                docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.75.0 image jenkins-cicd-app:%BUILD_NUMBER%
+                    set PATH=%DOCKER_PATH%;%PATH%
+                    docker push %REGISTRY_PUSH%/%APP_NAME%:%BUILD_NUMBER%
                 '''
             }
         }
 
-        stage('Deploy to Minikube') {
+        stage('Deploy to Staging') {
+            agent { label 'staging-agent' }
             steps {
                 bat '''
-                set PATH=C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;%PATH%
-                set MINIKUBE_HOME=C:\\Users\\user
-                set KUBECONFIG=C:\\Users\\user\\.kube\\config
+                    set PATH=%DOCKER_PATH%;C:\\Program Files\\Kubernetes\\Minikube;%PATH%
+                    set KUBECONFIG=%KUBECONFIG%
+                    set MINIKUBE_HOME=%MINIKUBE_HOME%
 
-                echo ===== Minikube Profile =====
-                minikube profile list
+                    kubectl create deployment %APP_NAME% --image=%REGISTRY_PULL%/%APP_NAME%:%BUILD_NUMBER% -n staging --dry-run=client -o yaml | kubectl apply -f -
+                    if errorlevel 1 exit /b 1
 
-                echo ===== Loading Image Version %BUILD_NUMBER% =====
-                minikube image load jenkins-cicd-app:%BUILD_NUMBER%
+                    kubectl rollout status deployment/%APP_NAME% -n staging --timeout=180s
+                    if errorlevel 1 exit /b 1
 
-                echo ===== Updating Kubernetes Deployment =====
-                kubectl set image deployment/jenkins-cicd-app jenkins-cicd-app=jenkins-cicd-app:%BUILD_NUMBER% -n cicd
+                    kubectl expose deployment %APP_NAME% --name=%APP_NAME% --port=8080 --target-port=8080 --type=NodePort -n staging --dry-run=client -o yaml | kubectl apply -f -
+                    if errorlevel 1 exit /b 1
 
-                echo ===== Checking Deployment =====
-                kubectl rollout status deployment/jenkins-cicd-app -n cicd
+                    kubectl exec deployment/%APP_NAME% -n staging -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode())"
                 '''
             }
         }
 
-        stage('Approval') {
+        stage('Approve Production') {
             steps {
-                input message: 'Approve production deployment?', ok: 'Deploy'
+                input message: 'Staging passed. Approve this image version for production?', ok: 'Approve production'
             }
         }
 
-        stage('Rollback') {
+        stage('Deploy to Production') {
+            agent { label 'production-agent' }
             steps {
-                input message: 'Trigger Kubernetes rollback?', ok: 'Rollback'
                 bat '''
-                set PATH=C:\\Users\\user\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin;%PATH%
-                set MINIKUBE_HOME=C:\\Users\\user
-                set KUBECONFIG=C:\\Users\\user\\.kube\\config
+                    set PATH=%DOCKER_PATH%;C:\\Program Files\\Kubernetes\\Minikube;%PATH%
+                    set KUBECONFIG=%KUBECONFIG%
+                    set MINIKUBE_HOME=%MINIKUBE_HOME%
 
-                echo ===== Rolling Back Deployment =====
-                kubectl rollout undo deployment/jenkins-cicd-app -n cicd
+                    kubectl create deployment %APP_NAME% --image=%REGISTRY_PULL%/%APP_NAME%:%BUILD_NUMBER% -n production --dry-run=client -o yaml | kubectl apply -f -
+                    if errorlevel 1 exit /b 1
 
-                echo ===== Verifying Rollback =====
-                kubectl rollout status deployment/jenkins-cicd-app -n cicd
+                    kubectl rollout status deployment/%APP_NAME% -n production --timeout=180s
+                    if errorlevel 1 exit /b 1
+
+                    kubectl expose deployment %APP_NAME% --name=%APP_NAME% --port=8080 --target-port=8080 --type=NodePort -n production --dry-run=client -o yaml | kubectl apply -f -
+                    if errorlevel 1 exit /b 1
+
+                    kubectl exec deployment/%APP_NAME% -n production -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode())"
                 '''
+            }
+            post {
+                failure {
+                    echo 'Production deployment failed. Attempting rollback to the previous revision.'
+                    bat '''
+                        set PATH=%DOCKER_PATH%;C:\\Program Files\\Kubernetes\\Minikube;%PATH%
+                        set KUBECONFIG=%KUBECONFIG%
+                        kubectl rollout undo deployment/%APP_NAME% -n production
+                        if errorlevel 1 echo No previous deployment revision could be restored. Check the production deployment manually.
+                    '''
+                }
             }
         }
     }
