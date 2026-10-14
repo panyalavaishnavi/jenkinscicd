@@ -1,4 +1,3 @@
-
 pipeline {
     agent none
 
@@ -20,47 +19,62 @@ pipeline {
     stages {
         stage('Checkout and Build') {
             agent { label 'staging-agent' }
+
             steps {
                 checkout scm
+
                 bat '''
                     set PATH=%DOCKER_PATH%;C:\\Program Files\\Kubernetes\\Minikube;%PATH%
+
                     echo ===== Python syntax check =====
-                    python -m py_compile app.py
+                    docker run --rm -v "%CD%:/app" -w /app python:3.12-slim python -m py_compile app.py
+                    if errorlevel 1 exit /b 1
+
                     echo ===== Build version %BUILD_NUMBER% =====
                     docker build -t %REGISTRY_PUSH%/%APP_NAME%:%BUILD_NUMBER% .
+                    if errorlevel 1 exit /b 1
                 '''
             }
         }
 
         stage('Trivy Security Scan') {
             agent { label 'staging-agent' }
+
             steps {
                 bat '''
                     set PATH=%DOCKER_PATH%;%PATH%
+
                     echo ===== Scanning image =====
                     docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.75.0 image --exit-code 1 --severity CRITICAL %REGISTRY_PUSH%/%APP_NAME%:%BUILD_NUMBER%
+                    if errorlevel 1 exit /b 1
                 '''
             }
         }
 
         stage('Push Image') {
             agent { label 'staging-agent' }
+
             steps {
                 bat '''
                     set PATH=%DOCKER_PATH%;%PATH%
+
+                    echo ===== Pushing image =====
                     docker push %REGISTRY_PUSH%/%APP_NAME%:%BUILD_NUMBER%
+                    if errorlevel 1 exit /b 1
                 '''
             }
         }
 
         stage('Deploy to Staging') {
             agent { label 'staging-agent' }
+
             steps {
                 bat '''
                     set PATH=%DOCKER_PATH%;C:\\Program Files\\Kubernetes\\Minikube;%PATH%
                     set KUBECONFIG=%KUBECONFIG%
                     set MINIKUBE_HOME=%MINIKUBE_HOME%
 
+                    echo ===== Deploying to staging =====
                     kubectl create deployment %APP_NAME% --image=%REGISTRY_PULL%/%APP_NAME%:%BUILD_NUMBER% -n staging --dry-run=client -o yaml | kubectl apply -f -
                     if errorlevel 1 exit /b 1
 
@@ -70,7 +84,9 @@ pipeline {
                     kubectl expose deployment %APP_NAME% --name=%APP_NAME% --port=8080 --target-port=8080 --type=NodePort -n staging --dry-run=client -o yaml | kubectl apply -f -
                     if errorlevel 1 exit /b 1
 
+                    echo ===== Staging health check =====
                     kubectl exec deployment/%APP_NAME% -n staging -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode())"
+                    if errorlevel 1 exit /b 1
                 '''
             }
         }
@@ -83,12 +99,14 @@ pipeline {
 
         stage('Deploy to Production') {
             agent { label 'production-agent' }
+
             steps {
                 bat '''
                     set PATH=%DOCKER_PATH%;C:\\Program Files\\Kubernetes\\Minikube;%PATH%
                     set KUBECONFIG=%KUBECONFIG%
                     set MINIKUBE_HOME=%MINIKUBE_HOME%
 
+                    echo ===== Deploying to production =====
                     kubectl create deployment %APP_NAME% --image=%REGISTRY_PULL%/%APP_NAME%:%BUILD_NUMBER% -n production --dry-run=client -o yaml | kubectl apply -f -
                     if errorlevel 1 exit /b 1
 
@@ -98,15 +116,21 @@ pipeline {
                     kubectl expose deployment %APP_NAME% --name=%APP_NAME% --port=8080 --target-port=8080 --type=NodePort -n production --dry-run=client -o yaml | kubectl apply -f -
                     if errorlevel 1 exit /b 1
 
+                    echo ===== Production health check =====
                     kubectl exec deployment/%APP_NAME% -n production -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode())"
+                    if errorlevel 1 exit /b 1
                 '''
             }
+
             post {
                 failure {
                     echo 'Production deployment failed. Attempting rollback to the previous revision.'
+
                     bat '''
                         set PATH=%DOCKER_PATH%;C:\\Program Files\\Kubernetes\\Minikube;%PATH%
                         set KUBECONFIG=%KUBECONFIG%
+                        set MINIKUBE_HOME=%MINIKUBE_HOME%
+
                         kubectl rollout undo deployment/%APP_NAME% -n production
                         if errorlevel 1 echo No previous deployment revision could be restored. Check the production deployment manually.
                     '''
